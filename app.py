@@ -22,33 +22,20 @@ DEFAULT_SLOTLIST = [
     "GALAXY RACER", "UB ESPORTS", "EVL ESPORTS", "NIGMA GALAXY"
 ]
 
+# ==========================================
+# OCR ENGINE
+# ==========================================
 @st.cache_resource
 def load_ocr_engine():
     import easyocr
     return easyocr.Reader(['en'], gpu=False)
 
-def clean_ocr_text(text: str) -> str:
-    text = re.sub(r'(?<!\w)[Oo](?!\w)', '0', text)
-    text = re.sub(r'(?<!\w)[lI](?!\w)', '1', text)
-    text = re.sub(r'[꧁꧂☠✦★༺༻]', '', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    return text.strip()
-
-def calculate_points(rank, kills):
-    rank_pts = PLACEMENT_POINTS.get(rank, 0)
-    total_pts = rank_pts + kills
-    return rank_pts, total_pts
-
 def run_ocr(image):
-    """Run EasyOCR and return result in standard format"""
     ocr = load_ocr_engine()
     temp_path = "temp_ocr_img.png"
     image.save(temp_path)
     try:
         raw = ocr.readtext(temp_path)
-        # Convert EasyOCR format to PaddleOCR-compatible format
-        # EasyOCR: (bbox, text, conf)
-        # Our format: (bbox, (text, conf))
         result = [[(item[0], (item[1], item[2])) for item in raw]]
     except Exception as e:
         st.error(f"OCR Error: {str(e)}")
@@ -58,6 +45,68 @@ def run_ocr(image):
             os.remove(temp_path)
     return result
 
+# ==========================================
+# UTILITIES
+# ==========================================
+def clean_ocr_text(text: str) -> str:
+    text = re.sub(r'(?<!\w)[Oo](?!\w)', '0', text)
+    text = re.sub(r'(?<!\w)[lI](?!\w)', '1', text)
+    text = re.sub(r'[꧁꧂☠✦★༺༻]', '', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
+
+def calculate_points(rank, kills):
+    rank_pts = PLACEMENT_POINTS.get(int(rank), 0)
+    return rank_pts, rank_pts + int(kills)
+
+# ==========================================
+# LOBBY PARSER
+# ==========================================
+def parse_lobby(ocr_data, slotlist, image_width):
+    if not ocr_data or not ocr_data[0]:
+        return []
+    blocks = []
+    for line in ocr_data[0]:
+        bbox, (text, conf) = line
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        cx = sum(xs) / 4
+        cy = sum(ys) / 4
+        col = 'left' if cx < (image_width / 2) else 'right'
+        blocks.append({'text': clean_ocr_text(text), 'x': cx, 'y': cy, 'col': col})
+
+    left_col  = sorted([b for b in blocks if b['col'] == 'left'],  key=lambda b: b['y'])
+    right_col = sorted([b for b in blocks if b['col'] == 'right'], key=lambda b: b['y'])
+
+    def extract_col(col_blocks, start_rank):
+        if not col_blocks:
+            return []
+        rows, cur = [], [col_blocks[0]]
+        for b in col_blocks[1:]:
+            if abs(b['y'] - cur[0]['y']) < 50:
+                cur.append(b)
+            else:
+                rows.append(cur)
+                cur = [b]
+        rows.append(cur)
+        out = []
+        rank = start_rank
+        for row in rows:
+            row_text = " ".join(b['text'] for b in row)
+            if len(row_text) > 3:
+                best = process.extractOne(row_text, slotlist, scorer=fuzz.WRatio)
+                team = best[0] if best and best[1] > 45 else "UNKNOWN"
+                out.append({"Slot": rank, "Team Name": team, "Raw OCR": row_text})
+                rank += 1
+        return out
+
+    left_teams  = extract_col(left_col, 1)
+    right_teams = extract_col(right_col, 7 if left_teams else 1)
+    return left_teams + right_teams
+
+# ==========================================
+# MATCH RESULT PARSER
+# ==========================================
 def parse_match_result(ocr_data, slotlist, img_width, img_height):
     if not ocr_data or not ocr_data[0]:
         return []
@@ -67,7 +116,6 @@ def parse_match_result(ocr_data, slotlist, img_width, img_height):
         bbox, (text, conf) = line
         if conf < 0.20:
             continue
-        # EasyOCR bbox is [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
         xs = [p[0] for p in bbox]
         ys = [p[1] for p in bbox]
         cx = sum(xs) / 4
@@ -75,71 +123,54 @@ def parse_match_result(ocr_data, slotlist, img_width, img_height):
         clean = clean_ocr_text(text)
         if len(clean.strip()) < 1:
             continue
-        blocks.append({'text': clean, 'x': cx, 'y': cy, 'conf': conf})
+        blocks.append({'text': clean, 'x': cx, 'y': cy})
 
     if not blocks:
         return []
 
-    # Split LEFT (rank 1-5) and RIGHT (rank 6-11)
     left  = [b for b in blocks if b['x'] < img_width * 0.52]
     right = [b for b in blocks if b['x'] >= img_width * 0.52]
 
-    def group_into_rank_blocks(col_blocks, start_rank):
+    def group_col(col_blocks, start_rank):
         if not col_blocks:
             return []
-
         col_blocks.sort(key=lambda b: b['y'])
-
-        ys = [b['y'] for b in col_blocks]
+        ys     = [b['y'] for b in col_blocks]
         spread = max(ys) - min(ys)
-        tolerance = max(spread * 0.07, 15)
-
-        rows = []
-        cur = [col_blocks[0]]
+        tol    = max(spread * 0.07, 15)
+        rows, cur = [], [col_blocks[0]]
         for b in col_blocks[1:]:
-            if abs(b['y'] - cur[0]['y']) <= tolerance:
+            if abs(b['y'] - cur[0]['y']) <= tol:
                 cur.append(b)
             else:
                 rows.append(cur)
                 cur = [b]
         rows.append(cur)
 
-        rank_blocks = []
-        i = 0
+        out = []
         rank = start_rank
+        i = 0
         while i < len(rows):
-            block_rows = rows[i:i+2]
-            combined_text = ' '.join(
-                b['text'] for row in block_rows for b in row)
-
-            kill_matches = re.findall(
-                r'(\d+)\s*Eliminat', combined_text, re.IGNORECASE)
-            if not kill_matches:
-                kill_matches = re.findall(r'\b(\d{1,2})\b', combined_text)
-            total_kills = sum(int(k) for k in kill_matches)
-
-            best = process.extractOne(
-                combined_text, slotlist, scorer=fuzz.WRatio)
+            merged = rows[i:i+2]
+            text   = ' '.join(b['text'] for row in merged for b in row)
+            kills  = re.findall(r'(\d+)\s*Eliminat', text, re.IGNORECASE)
+            if not kills:
+                kills = re.findall(r'\b(\d{1,2})\b', text)
+            total_kills = sum(int(k) for k in kills)
+            best = process.extractOne(text, slotlist, scorer=fuzz.WRatio)
             team = best[0] if best and best[1] > 35 else "UNKNOWN"
-
-            rank_blocks.append({
-                'Rank': rank,
-                'Team Name': team,
-                'Kills': total_kills,
-                'Raw OCR': combined_text,
-                'Source': 'match_result'
+            out.append({
+                'Rank': rank, 'Team Name': team,
+                'Kills': total_kills, 'Raw OCR': text
             })
             rank += 1
             i += 2
+        return out
 
-        return rank_blocks
+    all_teams = group_col(left, 1) + group_col(right, 6)
 
-    left_teams  = group_into_rank_blocks(left, 1)
-    right_teams = group_into_rank_blocks(right, 6)
-    all_teams   = left_teams + right_teams
-
-    seen = set()
-    final = []
+    # Dedup
+    seen, final = set(), []
     for t in all_teams:
         key = t['Team Name'].upper().strip()
         if key not in seen:
@@ -148,100 +179,47 @@ def parse_match_result(ocr_data, slotlist, img_width, img_height):
         else:
             t['Team Name'] = f"DUPLICATE? {t['Team Name']}"
             final.append(t)
-
     return final[:12]
-
-def parse_lobby_result(ocr_data, slotlist, image_width):
-    if not ocr_data or not ocr_data[0]:
-        return []
-
-    blocks = []
-    for line in ocr_data[0]:
-        bbox, (text, conf) = line
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        center_x = sum(xs) / 4
-        center_y = sum(ys) / 4
-        col = 'left' if center_x < (image_width / 2) else 'right'
-        blocks.append({
-            'text': clean_ocr_text(text),
-            'x': center_x,
-            'y': center_y,
-            'col': col
-        })
-
-    left_col  = sorted([b for b in blocks if b['col'] == 'left'],  key=lambda b: b['y'])
-    right_col = sorted([b for b in blocks if b['col'] == 'right'], key=lambda b: b['y'])
-
-    def extract_from_column(col_blocks, starting_rank):
-        if not col_blocks:
-            return []
-        rows = []
-        current_row = [col_blocks[0]]
-        Y_TOLERANCE = 50
-        for block in col_blocks[1:]:
-            if abs(block['y'] - current_row[0]['y']) < Y_TOLERANCE:
-                current_row.append(block)
-            else:
-                rows.append(current_row)
-                current_row = [block]
-        rows.append(current_row)
-
-        teams_data = []
-        rank_counter = starting_rank
-        for row in rows:
-            row_text = " ".join([b['text'] for b in row])
-            kills_list = re.findall(r'(\d+)\s*Eliminati', row_text, re.IGNORECASE)
-            total_kills = sum([int(k) for k in kills_list])
-            best_match = process.extractOne(row_text, slotlist, scorer=fuzz.WRatio)
-            team_name = best_match[0] if best_match and best_match[1] > 50 else "UNKNOWN"
-            if len(row_text) > 3:
-                teams_data.append({
-                    "Rank": rank_counter,
-                    "Team Name": team_name,
-                    "Kills": total_kills,
-                    "Raw OCR": row_text,
-                    "Source": "lobby"
-                })
-                rank_counter += 1
-        return teams_data
-
-    left_teams  = extract_from_column(left_col, 1)
-    right_teams = extract_from_column(right_col, 6 if left_teams else 1)
-    teams_data  = left_teams + right_teams
-
-    seen = set()
-    deduped = []
-    for team in teams_data:
-        key = team["Team Name"].upper().strip()
-        if key not in seen and key != "UNKNOWN":
-            seen.add(key)
-            deduped.append(team)
-        else:
-            team["Team Name"] = f"DUPLICATE? {team['Team Name']}"
-            deduped.append(team)
-    return deduped
 
 
 # ==========================================
 # STREAMLIT UI
 # ==========================================
-st.set_page_config(page_title="MAG ESPORTS - FF Points Calculator", layout="wide")
-st.title("🏆 MAG ESPORTS: Free Fire Points Calculator")
+st.set_page_config(
+    page_title="MAG ESPORTS - FF Points Calculator",
+    layout="wide",
+    page_icon="🏆"
+)
 
-col1, col2 = st.columns([1, 2])
+st.markdown("""
+<h1 style='text-align:center; color:#FF4C29;'>
+    🏆 MAG ESPORTS — Free Fire Points Calculator
+</h1>
+""", unsafe_allow_html=True)
 
-with col1:
-    st.header("1. Settings & Upload")
+# ── SESSION STATE INIT ──────────────────────────────────────────
+if "slotlist"         not in st.session_state:
+    st.session_state.slotlist = DEFAULT_SLOTLIST.copy()
+if "match_results"    not in st.session_state:
+    st.session_state.match_results = []       # list of DataFrames
+if "match_names"      not in st.session_state:
+    st.session_state.match_names = []         # match labels
 
-    screen_type = st.radio("Screenshot Type", ["Match Result", "Lobby"], horizontal=True)
+# ══════════════════════════════════════════════════════════
+# STEP 1 — SLOTLIST
+# ══════════════════════════════════════════════════════════
+st.markdown("---")
+st.header("📋 Step 1 — Set Slotlist")
 
-    st.markdown("**Slotlist — Edit Team Names:**")
+slot_col1, slot_col2 = st.columns([1, 2])
+
+with slot_col1:
+    st.markdown("**Manually enter / edit team names:**")
     slotlist_df = pd.DataFrame({
         "Slot": list(range(1, 13)),
-        "Team Name": DEFAULT_SLOTLIST
+        "Team Name": st.session_state.slotlist
     })
-    edited_slotlist = st.data_editor(
+    edited_slot = st.data_editor(
         slotlist_df,
         num_rows="fixed",
         use_container_width=True,
@@ -251,147 +229,204 @@ with col1:
         },
         key="slotlist_editor"
     )
-    slotlist = edited_slotlist["Team Name"].dropna().str.strip().tolist()
+    st.session_state.slotlist = edited_slot["Team Name"].dropna().str.strip().tolist()
 
-    uploaded_files = st.file_uploader(
-        "Upload Screenshots (Select Multiple)",
-        type=['png', 'jpg', 'jpeg'],
-        accept_multiple_files=True
+with slot_col2:
+    st.markdown("**OR auto-fill slotlist from Lobby Screenshot:**")
+    lobby_file = st.file_uploader(
+        "Upload Lobby Screenshot",
+        type=['png','jpg','jpeg'],
+        key="lobby_uploader"
     )
-
-if uploaded_files:
-    all_match_results = []
-
-    with col2:
-        for i, uploaded_file in enumerate(uploaded_files):
-            st.markdown(f"---\n#### Match {i+1}: `{uploaded_file.name}`")
-            image = Image.open(uploaded_file).convert("RGB")
-            img_width, img_height = image.size
-            st.write(f"📐 Image Size: `{img_width} x {img_height}`")
-
-            if screen_type == "Match Result":
-                # Crop: remove FREE FIRE logo top, BACK button bottom, character right
-                w, h = image.size
-                image = image.crop((0, int(h*0.12), int(w*0.92), int(h*0.90)))
-                # Enhance contrast + sharpness for dark FF background
-                image = ImageEnhance.Contrast(image).enhance(2.0)
-                image = ImageEnhance.Sharpness(image).enhance(2.0)
-                img_width, img_height = image.size
-
-            with st.spinner(f"Running OCR on Match {i+1}..."):
-                result = run_ocr(image)
-
-            # Debug expander - always visible
-            with st.expander(f"🔍 Raw OCR Blocks — Match {i+1} ({len(result[0]) if result and result[0] else 0} blocks found)"):
-                if result and result[0]:
-                    debug_rows = []
-                    for line in result[0]:
-                        bbox, (text, conf) = line
-                        xs = [p[0] for p in bbox]
-                        ys = [p[1] for p in bbox]
-                        cx = round(sum(xs)/4)
-                        cy = round(sum(ys)/4)
-                        debug_rows.append({
-                            "Text": text,
-                            "Confidence": round(conf, 2),
-                            "Center X": cx,
-                            "Center Y": cy,
-                            "Side": "LEFT" if cx < img_width*0.52 else "RIGHT"
-                        })
-                    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
-                else:
-                    st.error("❌ OCR returned 0 blocks — try a clearer screenshot")
-
-            # Parse based on type
-            if screen_type == "Match Result":
-                extracted_data = parse_match_result(result, slotlist, img_width, img_height)
+    if lobby_file:
+        lobby_img = Image.open(lobby_file).convert("RGB")
+        w, h = lobby_img.size
+        st.image(lobby_img, caption="Lobby Screenshot", use_container_width=True)
+        if st.button("🔍 Extract Teams from Lobby SS"):
+            with st.spinner("Running OCR on Lobby..."):
+                lobby_result = run_ocr(lobby_img)
+            lobby_teams = parse_lobby(lobby_result, st.session_state.slotlist, w)
+            if lobby_teams:
+                names = ["UNKNOWN"] * 12
+                for t in lobby_teams:
+                    idx = int(t["Slot"]) - 1
+                    if 0 <= idx < 12:
+                        names[idx] = t["Team Name"]
+                st.session_state.slotlist = names
+                st.success(f"✅ Extracted {len(lobby_teams)} teams! Slotlist updated — check left table.")
+                st.rerun()
             else:
-                extracted_data = parse_lobby_result(result, slotlist, img_width)
+                st.error("❌ No teams found in lobby screenshot.")
 
-            st.write(f"✅ Teams extracted: **{len(extracted_data)}**")
+slotlist = st.session_state.slotlist
 
-            df = pd.DataFrame(extracted_data)
+# ══════════════════════════════════════════════════════════
+# STEP 2 — MATCH RESULTS UPLOAD
+# ══════════════════════════════════════════════════════════
+st.markdown("---")
+st.header("🎮 Step 2 — Upload Match Result Screenshots")
 
-            if not df.empty:
+match_files = st.file_uploader(
+    "Upload Match Result Screenshots (select multiple for bulk)",
+    type=['png','jpg','jpeg'],
+    accept_multiple_files=True,
+    key="match_uploader"
+)
+
+if match_files:
+    if st.button("⚡ Process All Match Screenshots"):
+        st.session_state.match_results = []
+        st.session_state.match_names   = []
+
+        for i, mf in enumerate(match_files):
+            with st.spinner(f"Processing Match {i+1}: {mf.name}..."):
+                img = Image.open(mf).convert("RGB")
+                w, h = img.size
+
+                # Preprocess for match result
+                img = img.crop((0, int(h*0.12), int(w*0.92), int(h*0.90)))
+                img = ImageEnhance.Contrast(img).enhance(2.0)
+                img = ImageEnhance.Sharpness(img).enhance(2.0)
+                iw, ih = img.size
+
+                result = run_ocr(img)
+                extracted = parse_match_result(result, slotlist, iw, ih)
+
+            if extracted:
+                df = pd.DataFrame(extracted)
                 df[['Place Pts', 'Total Pts']] = df.apply(
-                    lambda row: calculate_points(row['Rank'], row['Kills']),
+                    lambda r: calculate_points(r['Rank'], r['Kills']),
                     axis=1, result_type="expand"
                 )
-                df = df[['Rank', 'Team Name', 'Kills', 'Place Pts', 'Total Pts', 'Raw OCR', 'Source']]
-                all_match_results.append(df)
-
-                leaderboard = df.sort_values(
-                    by=['Total Pts', 'Place Pts'], ascending=[False, False]
-                ).reset_index(drop=True)
-                leaderboard['Final Rank'] = leaderboard.index + 1
-
-                show_raw = st.toggle("🔍 Show Raw OCR Debug Columns", value=False, key=f"raw_{i}")
-                display_df = leaderboard if show_raw else leaderboard.drop(
-                    columns=["Raw OCR", "Source"], errors='ignore')
-
-                st.markdown("**✏️ Edit table below if needed, then generate image:**")
-                edited_df = st.data_editor(
-                    display_df, num_rows="dynamic",
-                    use_container_width=True, key=f"editor_{i}")
-
-                st.info("✅ Review table above. Fix any errors, then click Generate.")
-
-                has_dupes = edited_df["Team Name"].str.upper().str.strip().str.startswith("DUPLICATE?").any()
-                if has_dupes:
-                    st.warning("⚠️ Duplicate team names found! Fix them before generating.")
-                else:
-                    if st.button(f"🎨 Generate Leaderboard Image — Match {i+1}", key=f"gen_{i}"):
-                        try:
-                            template = Image.open("template.png")
-                        except FileNotFoundError:
-                            template = Image.new('RGB', (1080, 1920), color=(20, 20, 30))
-
-                        draw = ImageDraw.Draw(template)
-                        try:
-                            font_big  = ImageFont.truetype("arial.ttf", 40)
-                            font_med  = ImageFont.truetype("arial.ttf", 32)
-                        except IOError:
-                            font_big = font_med = ImageFont.load_default()
-
-                        START_X    = 80
-                        START_Y    = 300
-                        ROW_HEIGHT = 100
-
-                        # Header
-                        draw.text((540, 100), "MAG ESPORTS", fill="#FF4C29", font=font_big, anchor="mm")
-                        draw.text((540, 160), "MATCH RESULTS", fill="white", font=font_med, anchor="mm")
-
-                        for idx, row in edited_df.iterrows():
-                            y_pos = START_Y + (idx * ROW_HEIGHT)
-                            draw.text((START_X,        y_pos), str(row.get('Final Rank', idx+1)), fill="white",  font=font_med)
-                            draw.text((START_X + 150,  y_pos), str(row['Team Name']),              fill="gold",   font=font_med)
-                            draw.text((START_X + 600,  y_pos), str(row['Kills']),                  fill="white",  font=font_med)
-                            draw.text((START_X + 800,  y_pos), str(row['Total Pts']),              fill="#00FFFF",font=font_med)
-
-                        st.image(template, caption="Generated Leaderboard", use_container_width=True)
-
-                        img_byte_arr = io.BytesIO()
-                        template.save(img_byte_arr, format='PNG')
-                        st.download_button(
-                            label="⬇️ Download Leaderboard Image",
-                            data=img_byte_arr.getvalue(),
-                            file_name=f"leaderboard_match_{i+1}.png",
-                            mime="image/png",
-                            key=f"dl_{i}"
-                        )
+                st.session_state.match_results.append(df)
+                st.session_state.match_names.append(mf.name)
             else:
-                st.error("❌ No teams found. Check debug expander above for raw OCR output.")
+                st.warning(f"⚠️ Match {i+1} ({mf.name}): No teams extracted.")
 
-        # Aggregate section
-        if len(all_match_results) > 1:
-            st.markdown("---")
-            st.header("📊 Aggregate Leaderboard — All Matches")
-            combined = pd.concat(all_match_results, ignore_index=True)
-            agg = combined.groupby("Team Name", as_index=False).agg(
-                Total_Kills=("Kills", "sum"),
-                Total_Place_Pts=("Place Pts", "sum"),
-                Total_Points=("Total Pts", "sum"),
-                Matches_Played=("Rank", "count")
-            ).sort_values("Total_Points", ascending=False).reset_index(drop=True)
-            agg["Overall Rank"] = agg.index + 1
-            st.dataframe(agg, use_container_width=True)
+        st.success(f"✅ {len(st.session_state.match_results)} match(es) processed!")
+        st.rerun()
+
+# ══════════════════════════════════════════════════════════
+# STEP 3 — VIEW + EDIT MATCH DATA
+# ══════════════════════════════════════════════════════════
+if st.session_state.match_results:
+    st.markdown("---")
+    st.header("✏️ Step 3 — Review & Edit Match Data")
+
+    tabs = st.tabs([f"Match {i+1}" for i in range(len(st.session_state.match_results))])
+
+    for i, (tab, df, name) in enumerate(zip(
+        tabs,
+        st.session_state.match_results,
+        st.session_state.match_names
+    )):
+        with tab:
+            st.markdown(f"**File:** `{name}`")
+            show_raw = st.toggle("Show Raw OCR Debug", value=False, key=f"raw_{i}")
+
+            display_cols = ['Rank','Team Name','Kills','Place Pts','Total Pts']
+            if show_raw:
+                display_cols.append('Raw OCR')
+
+            edited = st.data_editor(
+                df[display_cols],
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"match_editor_{i}"
+            )
+            # Save edits back
+            for col in display_cols:
+                if col in edited.columns:
+                    st.session_state.match_results[i][col] = edited[col].values
+
+    # ══════════════════════════════════════════════════════════
+    # STEP 4 — AGGREGATE POINTS TABLE
+    # ══════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("📊 Step 4 — Aggregate Points Table")
+
+    combined = pd.concat(st.session_state.match_results, ignore_index=True)
+
+    agg = combined.groupby("Team Name", as_index=False).agg(
+        Total_Kills    = ("Kills",      "sum"),
+        Total_Place_Pts= ("Place Pts",  "sum"),
+        Total_Points   = ("Total Pts",  "sum"),
+        Matches_Played = ("Rank",       "count")
+    ).sort_values("Total_Points", ascending=False).reset_index(drop=True)
+    agg["Overall Rank"] = agg.index + 1
+    agg = agg[["Overall Rank","Team Name","Matches_Played",
+               "Total_Kills","Total_Place_Pts","Total_Points"]]
+    agg.columns = ["#","Team","Matches","Total Kills","Place Pts","Total Points"]
+
+    st.dataframe(
+        agg,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # ══════════════════════════════════════════════════════════
+    # STEP 5 — GENERATE LEADERBOARD IMAGE
+    # ══════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("🎨 Step 5 — Generate Leaderboard Image")
+
+    if st.button("🏆 Generate Final Leaderboard Image"):
+        try:
+            template = Image.open("template.png")
+        except FileNotFoundError:
+            template = Image.new('RGB', (1080, 1920), color=(15, 15, 25))
+
+        draw = ImageDraw.Draw(template)
+        try:
+            font_title = ImageFont.truetype("arial.ttf", 52)
+            font_sub   = ImageFont.truetype("arial.ttf", 36)
+            font_row   = ImageFont.truetype("arial.ttf", 30)
+            font_hdr   = ImageFont.truetype("arial.ttf", 28)
+        except IOError:
+            font_title = font_sub = font_row = font_hdr = ImageFont.load_default()
+
+        # Header
+        draw.rectangle([(0,0),(1080,80)], fill="#FF4C29")
+        draw.text((540, 40),  "MAG ESPORTS",    fill="white",  font=font_title, anchor="mm")
+        draw.text((540, 130), "AGGREGATE LEADERBOARD", fill="#FF4C29", font=font_sub, anchor="mm")
+
+        # Column headers
+        START_Y = 220
+        ROW_H   = 85
+        draw.text((60,  START_Y), "#",           fill="#94a3b8", font=font_hdr)
+        draw.text((130, START_Y), "TEAM",         fill="#94a3b8", font=font_hdr)
+        draw.text((620, START_Y), "KILLS",        fill="#94a3b8", font=font_hdr)
+        draw.text((750, START_Y), "PLACE PTS",    fill="#94a3b8", font=font_hdr)
+        draw.text((900, START_Y), "TOTAL",        fill="#94a3b8", font=font_hdr)
+
+        # Divider
+        draw.line([(50, START_Y+45),(1040, START_Y+45)], fill="#2A2E3A", width=2)
+
+        for idx, row in agg.iterrows():
+            y = START_Y + 80 + (idx * ROW_H)
+            # Alternate row bg
+            if idx % 2 == 0:
+                draw.rectangle([(50, y-15),(1040, y+55)], fill="#1a1a2e")
+            draw.text((60,  y), str(row["#"]),           fill="white",   font=font_row)
+            draw.text((130, y), str(row["Team"]),         fill="#FFD700", font=font_row)
+            draw.text((620, y), str(row["Total Kills"]),  fill="white",   font=font_row)
+            draw.text((750, y), str(row["Place Pts"]),    fill="#94a3b8", font=font_row)
+            draw.text((900, y), str(row["Total Points"]), fill="#00FFFF", font=font_row)
+
+        st.image(template, caption="Final Leaderboard", use_container_width=True)
+
+        buf = io.BytesIO()
+        template.save(buf, format='PNG')
+        st.download_button(
+            label="⬇️ Download Leaderboard Image",
+            data=buf.getvalue(),
+            file_name="mag_esports_leaderboard.png",
+            mime="image/png"
+        )
+
+    # Clear all matches button
+    st.markdown("---")
+    if st.button("🗑️ Clear All Match Data & Start Fresh"):
+        st.session_state.match_results = []
+        st.session_state.match_names   = []
+        st.rerun()
