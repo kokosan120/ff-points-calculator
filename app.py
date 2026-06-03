@@ -232,31 +232,51 @@ with slot_col1:
     st.session_state.slotlist = edited_slot["Team Name"].dropna().str.strip().tolist()
 
 with slot_col2:
-    st.markdown("**OR auto-fill slotlist from Lobby Screenshot:**")
-    lobby_file = st.file_uploader(
-        "Upload Lobby Screenshot",
+    st.markdown("**OR auto-fill slotlist from Lobby Screenshots:**")
+    st.caption("📌 Select ALL lobby screenshots at once (multiple allowed)")
+    lobby_files = st.file_uploader(
+        "Upload Lobby Screenshots (Select All at Once)",
         type=['png','jpg','jpeg'],
+        accept_multiple_files=True,
         key="lobby_uploader"
     )
-    if lobby_file:
-        lobby_img = Image.open(lobby_file).convert("RGB")
-        w, h = lobby_img.size
-        st.image(lobby_img, caption="Lobby Screenshot", use_container_width=True)
-        if st.button("🔍 Extract Teams from Lobby SS"):
-            with st.spinner("Running OCR on Lobby..."):
-                lobby_result = run_ocr(lobby_img)
-            lobby_teams = parse_lobby(lobby_result, st.session_state.slotlist, w)
-            if lobby_teams:
+    if lobby_files:
+        # Show previews in a row
+        prev_cols = st.columns(len(lobby_files))
+        for ci, lf in enumerate(lobby_files):
+            with prev_cols[ci]:
+                st.image(Image.open(lf), caption=f"Lobby {ci+1}", use_container_width=True)
+
+        if st.button("🔍 Extract Teams from All Lobby Screenshots"):
+            all_lobby_teams = []
+            for ci, lf in enumerate(lobby_files):
+                lf.seek(0)
+                lobby_img = Image.open(lf).convert("RGB")
+                w, h = lobby_img.size
+                with st.spinner(f"OCR on Lobby {ci+1}: {lf.name}..."):
+                    lobby_result = run_ocr(lobby_img)
+                teams = parse_lobby(lobby_result, st.session_state.slotlist, w)
+                st.write(f"Lobby {ci+1} → {len(teams)} teams found")
+                all_lobby_teams.extend(teams)
+
+            if all_lobby_teams:
                 names = ["UNKNOWN"] * 12
-                for t in lobby_teams:
+                # Fill by slot number extracted
+                for t in all_lobby_teams:
                     idx = int(t["Slot"]) - 1
-                    if 0 <= idx < 12:
+                    if 0 <= idx < 12 and names[idx] == "UNKNOWN":
                         names[idx] = t["Team Name"]
+                # If slots all came as 1 (OCR didnt get rank), fill sequentially
+                filled = [n for n in names if n != "UNKNOWN"]
+                if len(filled) < len(all_lobby_teams):
+                    names = ["UNKNOWN"] * 12
+                    for si, t in enumerate(all_lobby_teams[:12]):
+                        names[si] = t["Team Name"]
                 st.session_state.slotlist = names
-                st.success(f"✅ Extracted {len(lobby_teams)} teams! Slotlist updated — check left table.")
+                st.success(f"✅ {len(all_lobby_teams)} teams extracted from {len(lobby_files)} screenshots! Slotlist updated.")
                 st.rerun()
             else:
-                st.error("❌ No teams found in lobby screenshot.")
+                st.error("❌ No teams found. Try clearer screenshots.")
 
 slotlist = st.session_state.slotlist
 
