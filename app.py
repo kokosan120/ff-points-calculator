@@ -875,40 +875,39 @@ with tab_add:
                 "rank": slot_ranks.get(slot, slot), "kills": slot_kills.get(slot, 0),
             })
     
-    # Display editable columns
-    header_cols = st.columns([0.5, 2, 2, 1, 1, 1.5])
-    header_cols[0].markdown("**Slot**")
-    header_cols[1].markdown("**Team**")
-    header_cols[2].markdown("**Player IGN**")
-    header_cols[3].markdown("**Rank**")
-    header_cols[4].markdown("**Kills**")
-    header_cols[5].markdown("**Points**")
-    
-    final_results = []
-    for row in entry_rows:
-        c0, c1, c2, c3, c4, c5 = st.columns([0.5, 2, 2, 1, 1, 1.5])
-        c0.markdown(f"**{row['slot']}**")
-        c1.markdown(f'<span style="color:#e2e8f0">{row["team"]}</span>', unsafe_allow_html=True)
-        c2.markdown(f'<span style="color:#60a5fa;font-size:0.85rem">{row["player_ign"]}</span>', unsafe_allow_html=True)
-        
-        rank  = c3.number_input("", min_value=1, max_value=12, value=row["rank"],  key=f"rank_{match_name}_{row['slot']}", label_visibility="collapsed")
-        kills = c4.number_input("", min_value=0, max_value=99, value=row["kills"], key=f"kills_{match_name}_{row['slot']}", label_visibility="collapsed")
-        pts   = calculate_points(rank, kills)
-        c5.markdown(f'<span style="color:#ff6b00;font-weight:700;font-size:1.1rem">{pts} pts</span>', unsafe_allow_html=True)
-        
-        final_results.append({"slot": row["slot"], "rank": rank, "kills": kills})
-    
-    st.markdown("---")
-    if st.button(f"💾 SAVE MATCH — {match_name}", use_container_width=True):
-        # Remove existing match with same name
-        st.session_state.matches = [m for m in st.session_state.matches if m["match_name"] != match_name]
-        st.session_state.matches.append({
-            "match_name": match_name,
-            "results": final_results
-        })
-        st.success(f"✅ {match_name} saved! {len(st.session_state.matches)} match(es) total.")
-        st.balloons()
-        st.rerun()
+        # Display editable columns
+        header_cols = st.columns([0.5, 2, 2, 1, 1, 1.5])
+        header_cols[0].markdown("**Slot**")
+        header_cols[1].markdown("**Team**")
+        header_cols[2].markdown("**Player IGN**")
+        header_cols[3].markdown("**Rank**")
+        header_cols[4].markdown("**Kills**")
+        header_cols[5].markdown("**Points**")
+
+        final_results = []
+        for row in entry_rows:
+            c0, c1, c2, c3, c4, c5 = st.columns([0.5, 2, 2, 1, 1, 1.5])
+            c0.markdown(f"**{row['slot']}**")
+            c1.markdown(f'<span style="color:#e2e8f0">{row["team"]}</span>', unsafe_allow_html=True)
+            c2.markdown(f'<span style="color:#60a5fa;font-size:0.85rem">{row["player_ign"]}</span>', unsafe_allow_html=True)
+
+            rank  = c3.number_input("", min_value=1, max_value=12, value=row["rank"],  key=f"rank_{match_name}_{row['slot']}", label_visibility="collapsed")
+            kills = c4.number_input("", min_value=0, max_value=99, value=row["kills"], key=f"kills_{match_name}_{row['slot']}", label_visibility="collapsed")
+            pts   = calculate_points(rank, kills)
+            c5.markdown(f'<span style="color:#ff6b00;font-weight:700;font-size:1.1rem">{pts} pts</span>', unsafe_allow_html=True)
+
+            final_results.append({"slot": row["slot"], "rank": rank, "kills": kills})
+
+        st.markdown("---")
+        if st.button(f"💾 SAVE MATCH — {match_name}", use_container_width=True):
+            st.session_state.matches = [m for m in st.session_state.matches if m["match_name"] != match_name]
+            st.session_state.matches.append({
+                "match_name": match_name,
+                "results": final_results
+            })
+            st.success(f"✅ {match_name} saved! {len(st.session_state.matches)} match(es) total.")
+            st.balloons()
+            st.rerun()
 
 # ═══════════════════════════ TAB 2: LEADERBOARD ═══════════════════════════
 with tab_results:
