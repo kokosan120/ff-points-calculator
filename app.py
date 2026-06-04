@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import re
 import json
-from paddleocr import PaddleOCR
+import easyocr
 from fuzzywuzzy import fuzz
 
 # ─────────────────────────── PAGE CONFIG ───────────────────────────
@@ -131,7 +131,7 @@ html, body, [class*="css"] { font-family: 'Exo 2', sans-serif; }
 # ─────────────────────────── OCR INIT ───────────────────────────
 @st.cache_resource
 def load_ocr():
-    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+    return easyocr.Reader(["en"], gpu=False, verbose=False)
 
 ocr_engine = load_ocr()
 
@@ -200,25 +200,24 @@ def crop_roi(img_array, mode="match"):
 
 # ─────────────────────────── OCR HELPERS ───────────────────────────
 def run_ocr(img_array):
-    """Run PaddleOCR on preprocessed image, return list of (text, confidence, bbox)."""
-    # Convert grayscale→RGB for PaddleOCR
+    """Run EasyOCR on preprocessed image, return list of (text, confidence, y)."""
+    # EasyOCR accepts numpy array (grayscale or RGB)
     if len(img_array.shape) == 2:
-        rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+        img_input = img_array  # grayscale OK
     else:
-        rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-    
-    result = ocr_engine.ocr(rgb, cls=True)
+        img_input = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+
+    result = ocr_engine.readtext(img_input, detail=1, paragraph=False)
     lines = []
-    if result and result[0]:
-        for item in result[0]:
-            if item and len(item) >= 2:
-                bbox, (text, conf) = item[0], item[1]
-                lines.append({
-                    "text": text.strip(),
-                    "conf": conf,
-                    "bbox": bbox,
-                    "y": bbox[0][1]   # top-left y for vertical sort
-                })
+    for (bbox, text, conf) in result:
+        # bbox = [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+        y = bbox[0][1]
+        lines.append({
+            "text": text.strip(),
+            "conf": conf,
+            "bbox": bbox,
+            "y": y
+        })
     # Sort top-to-bottom
     lines.sort(key=lambda x: x["y"])
     return lines
