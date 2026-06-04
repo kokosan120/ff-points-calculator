@@ -672,109 +672,208 @@ st.markdown(f"""
 # ─────── TABS ───────
 tab_add, tab_results, tab_export = st.tabs(["➕  ADD MATCH", "📊  LEADERBOARD", "🖼️  EXPORT IMAGE"])
 
-# ═══════════════════════════ TAB 1: ADD MATCH ═══════════════════════════
+# ═══════════════════════════ TAB 1: ADD MATCH (BULK) ═══════════════════════════
 with tab_add:
-    st.markdown('<p class="section-header">Add New Match</p>', unsafe_allow_html=True)
-    
-    match_name = st.text_input("Match Name", f"Match {num_matches+1}", key="new_match_name")
-    
-    col_lobby, col_match = st.columns(2)
-    
-    with col_lobby:
-        st.markdown('<p class="section-header">📸 Lobby Screenshot (Optional)</p>', unsafe_allow_html=True)
-        st.caption("Upload lobby SS to automatically extract player IGNs for each slot.")
-        lobby_file = st.file_uploader("Lobby Screenshot", type=["jpg","jpeg","png","webp"], key="lobby_upload")
-        
-        lobby_map = {}  # {slot: player_ign}
-        
-        if lobby_file:
-            lobby_img = Image.open(lobby_file)
-            st.image(lobby_img, caption="Uploaded Lobby SS", use_container_width=True)
-            
-            if st.button("🔍 Extract Players from Lobby SS", use_container_width=True):
-                with st.spinner("OCR running on lobby screenshot..."):
-                    arr_bgr = cv2.cvtColor(np.array(lobby_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-                    roi = crop_roi(arr_bgr, "lobby")
-                    processed = preprocess_image(roi, "lobby")
-                    
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.image(roi[:,:,::-1], caption="Cropped ROI", use_container_width=True)
-                    with col_b:
-                        st.image(processed, caption="Pre-processed (OCR input)", use_container_width=True)
-                    
-                    lobby_map_raw, raw_lines = parse_lobby_screenshot(lobby_img)
-                    st.session_state[f"lobby_map_{match_name}"] = lobby_map_raw
-                    
-                    if lobby_map_raw:
-                        st.success(f"✅ {len(lobby_map_raw)} players extracted!")
-                        st.json({f"Slot {k}": v for k, v in sorted(lobby_map_raw.items())})
-                    else:
-                        st.warning("⚠️ No slot-player pairs found. Enter manually below.")
-                    
-                    with st.expander("📝 Raw OCR Lines"):
-                        for l in raw_lines:
-                            st.text(f"[conf:{l['conf']:.2f}] {l['text']}")
-    
-    with col_match:
-        st.markdown('<p class="section-header">📸 Match Result Screenshot</p>', unsafe_allow_html=True)
-        st.caption("Upload match result SS to auto-extract rank & kills.")
-        match_file = st.file_uploader("Match Result Screenshot", type=["jpg","jpeg","png","webp"], key="match_upload")
-        
-        if match_file:
-            match_img = Image.open(match_file)
-            st.image(match_img, caption="Uploaded Match Result", use_container_width=True)
-            
-            if st.button("🔍 Extract Ranks & Kills from Match SS", use_container_width=True):
-                with st.spinner("OCR running on match result..."):
-                    arr_bgr = cv2.cvtColor(np.array(match_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-                    roi = crop_roi(arr_bgr, "match")
-                    processed = preprocess_image(roi, "match")
-                    
-                    col_a2, col_b2 = st.columns(2)
-                    with col_a2:
-                        st.image(roi[:,:,::-1], caption="Cropped ROI", use_container_width=True)
-                    with col_b2:
-                        st.image(processed, caption="Pre-processed (OCR input)", use_container_width=True)
-                    
-                    extracted, raw_lines2 = parse_match_result(match_img)
-                    st.session_state[f"match_extract_{match_name}"] = extracted
-                    st.success(f"✅ {len(extracted)} rank entries found!")
-                    
-                    with st.expander("📝 Raw OCR Lines"):
-                        for l in raw_lines2:
-                            st.text(f"[conf:{l['conf']:.2f}] {l['text']}")
-    
-    # ─── MANUAL ENTRY TABLE ───
-    st.markdown('<p class="section-header">📋 Enter / Verify Match Data</p>', unsafe_allow_html=True)
-    st.caption("OCR auto-fills rank & kills. Verify and correct. Slot = team room position.")
-    
-    # Build default data
-    ocr_data = st.session_state.get(f"match_extract_{match_name}", None)
-    lobby_data = st.session_state.get(f"lobby_map_{match_name}", {})
-    
-    # Prepare initial values
-    slot_ranks  = {}
-    slot_kills  = {}
-    if ocr_data:
-        for i, e in enumerate(ocr_data[:12]):
-            slot = i + 1  # assume rank order = slot order (can be corrected)
-            slot_ranks[slot] = e["rank"]
-            slot_kills[slot] = e["kills"]
-    
-    entry_rows = []
-    for slot in range(1, 13):
-        team_name = st.session_state.teams.get(slot, f"Team {slot}")
-        player_ign = lobby_data.get(slot, "—")
-        default_rank  = slot_ranks.get(slot, slot)
-        default_kills = slot_kills.get(slot, 0)
-        entry_rows.append({
-            "slot": slot,
-            "team": team_name,
-            "player_ign": player_ign,
-            "rank": default_rank,
-            "kills": default_kills,
-        })
+
+    # ── MODE SELECTOR ──
+    st.markdown('<p class="section-header">📤 Upload Mode</p>', unsafe_allow_html=True)
+    upload_mode = st.radio(
+        "Choose upload mode:",
+        ["🎯 Single Match", "📦 Bulk Upload (Multiple Matches at once)"],
+        horizontal=True, key="upload_mode"
+    )
+
+    # ════════════ BULK MODE ════════════
+    if upload_mode == "📦 Bulk Upload (Multiple Matches at once)":
+        st.markdown('<p class="section-header">📦 Bulk Match Upload</p>', unsafe_allow_html=True)
+        st.info("Ek saath sabhi match screenshots upload karo. Har file = ek match. Files ka naam = Match name (e.g. match1.jpg, match2.jpg)")
+
+        col_bl, col_bm = st.columns(2)
+        with col_bl:
+            st.markdown("**📸 Lobby Screenshots (Optional)**")
+            st.caption("1 lobby SS ya har match ke liye alag — Slot→Player mapping ke liye")
+            bulk_lobby_files = st.file_uploader(
+                "Lobby Screenshots (one or multiple)",
+                type=["jpg","jpeg","png","webp"],
+                accept_multiple_files=True,
+                key="bulk_lobby"
+            )
+        with col_bm:
+            st.markdown("**📸 Match Result Screenshots**")
+            st.caption("Saare matches ki result SS ek saath upload karo")
+            bulk_match_files = st.file_uploader(
+                "Match Result Screenshots",
+                type=["jpg","jpeg","png","webp"],
+                accept_multiple_files=True,
+                key="bulk_match"
+            )
+
+        if bulk_match_files:
+            st.markdown(f'<p class="section-header">⚙️ Processing {len(bulk_match_files)} Match(es)</p>', unsafe_allow_html=True)
+
+            # Process lobby SS first (use first lobby SS for all if only one uploaded)
+            shared_lobby_map = {}
+            if bulk_lobby_files:
+                with st.spinner(f"Processing {len(bulk_lobby_files)} lobby screenshot(s)..."):
+                    for lf in bulk_lobby_files:
+                        limg = Image.open(lf)
+                        lmap, _ = parse_lobby_screenshot(limg)
+                        shared_lobby_map.update(lmap)
+                if shared_lobby_map:
+                    st.success(f"✅ Lobby SS: {len(shared_lobby_map)} players extracted")
+                    with st.expander("👥 Players Found"):
+                        st.json({f"Slot {k}": v for k, v in sorted(shared_lobby_map.items())})
+
+            # Process each match file
+            bulk_extracted = {}  # {filename: extracted_data}
+            progress = st.progress(0)
+            for idx, mf in enumerate(bulk_match_files):
+                mname = mf.name.rsplit('.', 1)[0]  # filename without extension
+                with st.spinner(f"OCR: {mname} ({idx+1}/{len(bulk_match_files)})..."):
+                    mimg = Image.open(mf)
+                    extracted, _ = parse_match_result(mimg)
+                    bulk_extracted[mname] = extracted
+                    st.session_state[f"match_extract_{mname}"] = extracted
+                    st.session_state[f"lobby_map_{mname}"] = shared_lobby_map
+                progress.progress((idx + 1) / len(bulk_match_files))
+
+            st.success(f"✅ {len(bulk_match_files)} matches processed! Verify data below.")
+
+            # Show all matches in expanders for verification
+            st.markdown('<p class="section-header">📋 Verify & Save All Matches</p>', unsafe_allow_html=True)
+            st.caption("OCR auto-filled data. Galat ho toh correct karo, phir 'Save All' dabao.")
+
+            all_bulk_results = {}
+            for mname, extracted in bulk_extracted.items():
+                with st.expander(f"✏️ {mname} — Click to verify", expanded=False):
+                    slot_ranks_b, slot_kills_b = {}, {}
+                    for i, e in enumerate(extracted[:12]):
+                        slot_ranks_b[i+1] = e["rank"]
+                        slot_kills_b[i+1] = e["kills"]
+
+                    match_results_b = []
+                    hcols = st.columns([0.5, 2, 2, 1, 1, 1.5])
+                    hcols[0].markdown("**Slot**"); hcols[1].markdown("**Team**")
+                    hcols[2].markdown("**Player IGN**"); hcols[3].markdown("**Rank**")
+                    hcols[4].markdown("**Kills**"); hcols[5].markdown("**Points**")
+
+                    for slot in range(1, 13):
+                        team_n = st.session_state.teams.get(slot, f"Team {slot}")
+                        ign_n  = shared_lobby_map.get(slot, "—")
+                        c0,c1,c2,c3,c4,c5 = st.columns([0.5,2,2,1,1,1.5])
+                        c0.markdown(f"**{slot}**")
+                        c1.markdown(f'<span style="color:#e2e8f0">{team_n}</span>', unsafe_allow_html=True)
+                        c2.markdown(f'<span style="color:#60a5fa;font-size:0.85rem">{ign_n}</span>', unsafe_allow_html=True)
+                        r = c3.number_input("", 1, 12, slot_ranks_b.get(slot, slot),  key=f"br_{mname}_{slot}", label_visibility="collapsed")
+                        k = c4.number_input("", 0, 99,  slot_kills_b.get(slot, 0),   key=f"bk_{mname}_{slot}", label_visibility="collapsed")
+                        pts = calculate_points(r, k)
+                        c5.markdown(f'<span style="color:#ff6b00;font-weight:700">{pts} pts</span>', unsafe_allow_html=True)
+                        match_results_b.append({"slot": slot, "rank": r, "kills": k})
+
+                    all_bulk_results[mname] = match_results_b
+
+            st.markdown("---")
+            if st.button("💾 SAVE ALL MATCHES", use_container_width=True):
+                saved = 0
+                for mname, results in all_bulk_results.items():
+                    st.session_state.matches = [m for m in st.session_state.matches if m["match_name"] != mname]
+                    st.session_state.matches.append({"match_name": mname, "results": results})
+                    saved += 1
+                st.success(f"✅ {saved} matches saved! Total: {len(st.session_state.matches)} matches.")
+                st.balloons()
+                st.rerun()
+
+    # ════════════ SINGLE MODE ════════════
+    else:
+        st.markdown('<p class="section-header">Add Single Match</p>', unsafe_allow_html=True)
+        match_name = st.text_input("Match Name", f"Match {num_matches+1}", key="new_match_name")
+
+        col_lobby, col_match = st.columns(2)
+
+        with col_lobby:
+            st.markdown('<p class="section-header">📸 Lobby Screenshot (Optional)</p>', unsafe_allow_html=True)
+            st.caption("Upload lobby SS to automatically extract player IGNs for each slot.")
+            lobby_file = st.file_uploader("Lobby Screenshot", type=["jpg","jpeg","png","webp"], key="lobby_upload")
+
+            if lobby_file:
+                lobby_img = Image.open(lobby_file)
+                st.image(lobby_img, caption="Uploaded Lobby SS", use_container_width=True)
+
+                if st.button("🔍 Extract Players from Lobby SS", use_container_width=True):
+                    with st.spinner("OCR running on lobby screenshot..."):
+                        arr_bgr = cv2.cvtColor(np.array(lobby_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+                        roi = crop_roi(arr_bgr, "lobby")
+                        processed = preprocess_image(roi, "lobby")
+
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.image(roi[:,:,::-1], caption="Cropped ROI", use_container_width=True)
+                        with col_b:
+                            st.image(processed, caption="Pre-processed (OCR input)", use_container_width=True)
+
+                        lobby_map_raw, raw_lines = parse_lobby_screenshot(lobby_img)
+                        st.session_state[f"lobby_map_{match_name}"] = lobby_map_raw
+
+                        if lobby_map_raw:
+                            st.success(f"✅ {len(lobby_map_raw)} players extracted!")
+                            st.json({f"Slot {k}": v for k, v in sorted(lobby_map_raw.items())})
+                        else:
+                            st.warning("⚠️ No slot-player pairs found. Enter manually below.")
+
+                        with st.expander("📝 Raw OCR Lines"):
+                            for l in raw_lines:
+                                st.text(f"[conf:{l['conf']:.2f}] {l['text']}")
+
+        with col_match:
+            st.markdown('<p class="section-header">📸 Match Result Screenshot</p>', unsafe_allow_html=True)
+            st.caption("Upload match result SS to auto-extract rank & kills.")
+            match_file = st.file_uploader("Match Result Screenshot", type=["jpg","jpeg","png","webp"], key="match_upload")
+
+            if match_file:
+                match_img = Image.open(match_file)
+                st.image(match_img, caption="Uploaded Match Result", use_container_width=True)
+
+                if st.button("🔍 Extract Ranks & Kills from Match SS", use_container_width=True):
+                    with st.spinner("OCR running on match result..."):
+                        arr_bgr = cv2.cvtColor(np.array(match_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+                        roi = crop_roi(arr_bgr, "match")
+                        processed = preprocess_image(roi, "match")
+
+                        col_a2, col_b2 = st.columns(2)
+                        with col_a2:
+                            st.image(roi[:,:,::-1], caption="Cropped ROI", use_container_width=True)
+                        with col_b2:
+                            st.image(processed, caption="Pre-processed (OCR input)", use_container_width=True)
+
+                        extracted, raw_lines2 = parse_match_result(match_img)
+                        st.session_state[f"match_extract_{match_name}"] = extracted
+                        st.success(f"✅ {len(extracted)} rank entries found!")
+
+                        with st.expander("📝 Raw OCR Lines"):
+                            for l in raw_lines2:
+                                st.text(f"[conf:{l['conf']:.2f}] {l['text']}")
+
+        # ─── MANUAL ENTRY TABLE ───
+        st.markdown('<p class="section-header">📋 Enter / Verify Match Data</p>', unsafe_allow_html=True)
+        st.caption("OCR auto-fills rank & kills. Verify and correct. Slot = team room position.")
+
+        ocr_data   = st.session_state.get(f"match_extract_{match_name}", None)
+        lobby_data = st.session_state.get(f"lobby_map_{match_name}", {})
+
+        slot_ranks, slot_kills = {}, {}
+        if ocr_data:
+            for i, e in enumerate(ocr_data[:12]):
+                slot_ranks[i+1] = e["rank"]
+                slot_kills[i+1] = e["kills"]
+
+        entry_rows = []
+        for slot in range(1, 13):
+            team_name = st.session_state.teams.get(slot, f"Team {slot}")
+            player_ign = lobby_data.get(slot, "—")
+            entry_rows.append({
+                "slot": slot, "team": team_name, "player_ign": player_ign,
+                "rank": slot_ranks.get(slot, slot), "kills": slot_kills.get(slot, 0),
+            })
     
     # Display editable columns
     header_cols = st.columns([0.5, 2, 2, 1, 1, 1.5])
